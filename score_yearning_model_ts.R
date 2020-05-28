@@ -3,10 +3,8 @@ library(reticulate)
 library(tensorflow)
 library(tfprobability)
 library(keras)
-library(caret)
 
-
-reticulate::use_condaenv('tf2gpu', required = TRUE)
+use_condaenv('tf2gpu', required = TRUE)
 
 ### For Aaron's COMP #################################
 ## Make sure tf gpu doesn;t f up
@@ -20,38 +18,33 @@ md <- keras_model_sequential() %>% layer_dense(units=2, input_shape=5, activatio
 
 rm(md)
 
-#############################
-x_train <- readRDS('D:/x_train_array.RDS')
-x_train_supp <- readRDS('D:/x_train_supp.RDS')
-y_train_df <- readRDS('D:/y_train.RDS')
-
-y_train <- log(y_train_df$close_out1)
-
-part <- createFolds(y_train_df$close_out1, k=3)
-
-## Split to Train/Test/Valid
-x_valid <- x_train[part[[1]],,]
-x_valid_supp <- x_train_supp[part[[1]],]
-y_valid <- y_train[part[[1]]]
 
 
-x_test <- x_train[part[[2]],,]
-x_test_supp <- x_train_supp[part[[2]],]
-y_test <- y_train[part[[2]]]
+x_test <- readRDS('D:/x_test_array.RDS')
+x_test_supp <- readRDS('D:/x_test_supp.RDS')
+y_test_df <- readRDS('D:/y_test.RDS')
+
+rows_of_interest <- sample(1:nrow(y_test_df), 100000) %>% order()
 
 
-x_train <- x_train[part[[3]],,]
-x_train_supp <- x_train_supp[part[[3]],]
-y_train <- y_train[part[[3]]]
+x_test <- x_test[rows_of_interest,,]
+x_test_supp <- x_test_supp[rows_of_interest,]
+y_test_df <- y_test_df[rows_of_interest,]
 
 
-ts_input <- layer_input(c(dim(x_train)[2], dim(x_train)[3]), name = 'ts_in') 
+y_test <- log(y_test_df$close_out1)
+
+x_test_supp <- as.matrix(x_test_supp)
+
+
+
+ts_input <- layer_input(c(dim(x_test)[2], dim(x_test)[3]), name = 'ts_in') 
 
 ts_lstm <- ts_input %>%
   bidirectional(layer_lstm(units = 128, name = 'lstm_1', return_sequences=TRUE, recurrent_regularizer = regularizer_l2())) %>%
   layer_lstm(units=64, name = 'lstm_2', recurrent_regularizer = regularizer_l2())
 
-supp_input <- layer_input(shape = ncol(x_train_supp), name = 'supp_in')
+supp_input <- layer_input(shape = ncol(x_test_supp), name = 'supp_in')
 
 supp_layers <- supp_input %>%
   layer_dense(units = 32, activation = 'relu') %>%
@@ -80,41 +73,10 @@ model_supp <- keras_model(
   outputs = out_layers
 )
 
-
-negloglik <- function(y, model) - (model %>% tfd_log_prob(y))
-
-learning_rate <- 0.001
-
-model_supp %>% compile(optimizer = optimizer_adam(lr = learning_rate), loss = negloglik)
-
-history <- model_supp %>% fit(x=list(ts_in=x_train, supp_in=x_train_supp), 
-                              y=list(y_train),
-                              shuffle=TRUE,
-                              validation_data = list(list(ts_in=x_valid, supp_in=x_valid_supp), y_valid),
-                              epochs = 200, 
-                              batch_size=8000, 
-                              callbacks=list(callback_early_stopping(monitor='val_loss', patience = 20),
-                                             callback_reduce_lr_on_plateau(monitor = "val_loss", factor = 0.1,
-                                                                           patience = 10, verbose = 0, mode = 'auto',
-                                                                           min_delta = 1e-04, cooldown = 0, min_lr = 0)),
-)
+load_model_weights_tf(model_supp, 'stonk_weights_v2_log.tf')
 
 
-#load_model_weights_tf(model_supp, 'stonk_weights_v2_log.tf')
-
-
-save_model_weights_tf(model_supp, 'stonk_weights_v2_log.tf', overwrite = TRUE)
-
-#rm(x_train_supp, x_train, y_train, x_valid_supp, x_valid, y_valid)
-
-
-rows_of_interest <- sample(part[[2]], 100000) %>% order()
-
-
-pred_dist <- model_supp(list(tf$constant(x_test[rows_of_interest,,]), tf$constant(x_test_supp[rows_of_interest,])))
-
-#pred_dist <- model_supp(list(tf$constant(x_test), tf$constant(x_test_supp)))
-
+pred_dist <- model_supp(list(tf$constant(x_test), tf$constant(x_test_supp)))
 
 
 est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
@@ -126,8 +88,6 @@ est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
 
 
 
-## Evalutate ##############
-
 out_df <- tibble(
   
   loc = pred_dist$loc %>% as.numeric(),
@@ -136,9 +96,10 @@ out_df <- tibble(
   tailweight = pred_dist$tailweight %>% as.numeric(),
   
   
-  close_last = y_test_df$close_last[part[[2]]][rows_of_interest],
-  actual_dlr =y_test_df$close_out1[part[[2]]][rows_of_interest],
+  close_last = y_test_df$close_last,
+  actual_dlr =y_test_df$close_out1,
   actual_pct = actual_dlr/close_last,
+  actual_dlr_cdf = est_pct_move(loc, scale, skewness, tailweight, actual_dlr, 1),
   
   quant10_dlr = pred_dist$quantile(.1) %>% as.numeric() %>% exp(),
   quant25_dlr = pred_dist$quantile(.25) %>% as.numeric() %>% exp(),
@@ -211,11 +172,12 @@ out_df %>%
   ggplot(aes(x=range_val, y=actual_pct, color=range_type, fill=range_type)) +
   geom_point(alpha=.1) +
   geom_smooth() +
-  facet_wrap(~range_type, scales = 'free') 
+  facet_wrap(~range_type, scales = 'free') +
+  coord_cartesian(xlim = c(0, .1))
 
 ## StandardDev by Range
 out_df %>%
-  sample_n(1000) %>%
+  #sample_n(1000) %>%
   mutate(range_80 = quant90_pct-quant10_pct,
          range_50 = quant75_pct-quant25_pct) %>%
   select(actual_pct, range_80, range_50) %>%
@@ -246,7 +208,7 @@ out_df %>%
                names_sep = '_better_') %>%
   pivot_wider(values_from = values, names_from = prob_act) %>%
   group_by(direction) %>%
-  mutate(prob_cut=cut_number(prob, 3)) %>%
+  mutate(prob_cut=cut_number(prob,5)) %>%
   ungroup() %>%
   arrange(prob) %>%
   mutate(prob_cut = fct_inorder(prob_cut)) %>%
@@ -268,9 +230,12 @@ out_df %>%
   sample_n(1000) %>%
   ggplot(aes(x=quant50_pct, y=actual_pct)) +
   geom_point(alpha=.3) +
-  geom_smooth() 
+  geom_smooth() +
+  coord_cartesian(xlim = c(.95, 1.05))
 
 
+
+cor(out_df$quant50_pct, out_df$actual_pct)
 
 out_df %>%
   sample_n(1000) %>%
@@ -279,3 +244,9 @@ out_df %>%
   geom_smooth() +
   coord_cartesian(xlim = c(.05, .4))
 
+
+
+## CDFs of Actual Closes
+out_df %>%
+  ggplot(aes(x=actual_dlr_cdf)) +
+  geom_histogram()
