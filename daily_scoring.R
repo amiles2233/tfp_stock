@@ -14,15 +14,15 @@ library(AlpacaforR)
 
 plan(multiprocess)
 
-use_condaenv('tf2gpu', required = TRUE)
+#use_condaenv('tf2gpu', required = TRUE)
 
-py_config()
+#py_config()
 
-tf_config()
+#tf_config()
 
-tf_gpu_configured()
+#tf_gpu_configured()
 
-md <- keras_model_sequential %>% layer_dense(units=2, input_share=5, activation='relu')
+#md <- keras_model_sequential() %>% layer_dense(units=2, input_shape=5, activation='relu')
 
 ###### Pull Alpaca Stock Info
 acct <- get_account()
@@ -33,7 +33,7 @@ calendar <- get_calendar(from = Sys.Date()-days(70), to=Sys.Date()) %>%
     arrange(desc(date)) %>%
     slice(1:43) 
 
-trading_day <- Sys.Date() + days(1)
+trading_day <- Sys.Date()
 
 #trading_day <- as.Date('2020-05-18')
 
@@ -41,8 +41,8 @@ trading_day <- Sys.Date() + days(1)
 supported <- supported_tickers() %>%
     filter(exchange %in% c('NYSE', 'NASDAQ', 'NYSE ARCA'),
            endDate >= Sys.Date()-days(5),
-           startDate <= min(calendar$date),
-           ticker %in% assets$symbol
+           startDate <= min(calendar$date)#,
+           #ticker %in% assets$symbol
     )
 
 
@@ -127,13 +127,11 @@ apply(x_supp, 2, function(x) sum(is.na(x)))
 x_supp[is.na(x_supp)] <- 0
 
 
-
 ts_input <- layer_input(c(dim(x)[2], dim(x)[3]), name = 'ts_in') 
 
 ts_lstm <- ts_input %>%
     bidirectional(layer_lstm(units = 128, name = 'lstm_1', return_sequences=TRUE, recurrent_regularizer = regularizer_l2())) %>%
     layer_lstm(units=64, name = 'lstm_2', recurrent_regularizer = regularizer_l2())
-
 
 supp_input <- layer_input(shape = ncol(x_supp), name = 'supp_in')
 
@@ -145,11 +143,11 @@ concat <- layer_concatenate(list(ts_lstm, supp_layers), name = 'concat')
 
 out_layers <- concat %>%
     layer_dense(units=128, activation = 'relu', regularizer_l1_l2()) %>%
-    layer_dense(units = 64, activation = 'relu', regularizer_l1_l2()) %>%
+    layer_dense(units = 128, activation = 'relu', regularizer_l1_l2()) %>%
     layer_dense(units = 128, activation = 'relu', regularizer_l1_l2()) %>%
     layer_dense(units = 64, activation = 'relu', regularizer_l1_l2()) %>%
-    layer_dense(units=32, activation = 'relu', regularizer_l1_l2()) %>%
-    layer_dense(units=32, activation = 'relu', regularizer_l1_l2()) %>%
+    layer_dense(units = 64, activation = 'relu', regularizer_l1_l2()) %>%
+    layer_dense(units = 128, activation = 'relu', regularizer_l1_l2()) %>%
     layer_dense(units = 4, activation = "linear") %>%
     layer_distribution_lambda(function(x) {
         tfd_sinh_arcsinh(loc = x[, 1, drop = FALSE],
@@ -163,6 +161,8 @@ model_supp <- keras_model(
     inputs = list(ts_in=ts_input, supp_in=supp_input),
     outputs = out_layers
 )
+
+
 load_model_weights_tf(model_supp, 'stonk_weights_v2.tf')
 
 
@@ -171,44 +171,54 @@ pred_dist <- model_supp(list(tf$constant(x), tf$constant(x_supp)))
 
 
 
+est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
+    1 - as.numeric(tfd_cdf(
+        distribution = tfd_sinh_arcsinh(loc=loc, scale=scale, skewness=skewness, tailweight=tailweight),
+        value = log(close_last*pct)
+    ))
+}
+
+
+
 
 out_df <- tibble(
-    
-    ticker = df$ticker,
     
     loc = pred_dist$loc %>% as.numeric(),
     scale = pred_dist$scale %>% as.numeric(),
     skewness = pred_dist$skewness %>% as.numeric(),
     tailweight = pred_dist$tailweight %>% as.numeric(),
     
+    
     close_last = df$close_last,
     volume_last = df$volume_last,
     
-    quant10_pct = pred_dist$quantile(.1) %>% as.numeric(), #%>% exp(),
-    quant25_pct = pred_dist$quantile(.25) %>% as.numeric(),# %>% exp(),
-    quant50_pct = pred_dist$quantile(.5) %>% as.numeric(),# %>% exp(),
-    quant75_pct = pred_dist$quantile(.75) %>% as.numeric(),# %>% exp(),
-    quant90_pct = pred_dist$quantile(.9) %>% as.numeric(),# %>% exp()
+    quant10_dlr = pred_dist$quantile(.1) %>% as.numeric() %>% exp(),
+    quant25_dlr = pred_dist$quantile(.25) %>% as.numeric() %>% exp(),
+    quant50_dlr = pred_dist$quantile(.5) %>% as.numeric() %>% exp(),
+    quant75_dlr = pred_dist$quantile(.75) %>% as.numeric() %>% exp(),
+    quant90_dlr = pred_dist$quantile(.9) %>% as.numeric() %>% exp(),
     
-    quant10_dlr = quant10_pct*close_last, 
-    quant25_dlr = quant25_pct*close_last, 
-    quant50_dlr = quant50_pct*close_last, 
-    quant75_dlr = quant75_pct*close_last, 
-    quant90_dlr = quant90_pct*close_last, 
+    quant10_pct = quant10_dlr/close_last, 
+    quant25_pct = quant25_dlr/close_last, 
+    quant50_pct = quant50_dlr/close_last, 
+    quant75_pct = quant75_dlr/close_last, 
+    quant90_pct = quant90_dlr/close_last,
     
-    pred_int_50_pct = quant75_pct-quant25_pct,
-    pred_int_80_pct = quant90_pct-quant10_pct,
+    prob_better_down10 = est_pct_move(loc, scale, skewness, tailweight, close_last, .9),
+    prob_better_down05 = est_pct_move(loc, scale, skewness, tailweight, close_last, .95),
+    prob_better_down01 = est_pct_move(loc, scale, skewness, tailweight, close_last, .99),
+    prob_better_flat = est_pct_move(loc, scale, skewness, tailweight, close_last, 1),
+    prob_better_up01 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.01),
+    prob_better_up05 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.05),
+    prob_better_up10 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.1),
     
-    pred_int_50_dlr = quant75_dlr-quant25_dlr,
-    pred_int_80_dlr = quant90_dlr-quant10_dlr,
-    
-    prob_better_down10 = 1-pred_dist$cdf(.9) %>% as.numeric(),
-    prob_better_down05 = 1-pred_dist$cdf(.95) %>% as.numeric(),
-    prob_better_down01 = 1-pred_dist$cdf(.99) %>% as.numeric(),
-    prob_better_flat = 1-pred_dist$cdf(1) %>% as.numeric(),
-    prob_better_up01 = 1-pred_dist$cdf(1.01) %>% as.numeric(),
-    prob_better_up05 = 1-pred_dist$cdf(1.05) %>% as.numeric(),
-    prob_better_up10 = 1-pred_dist$cdf(1.1) %>% as.numeric()
+    act_better_down10 = actual_pct>=.9,
+    act_better_down05 = actual_pct>=.95,
+    act_better_down01 = actual_pct>=.99,
+    act_better_flat = actual_pct>=1,
+    act_better_up01 = actual_pct>=1.01,
+    act_better_up05 = actual_pct>=1.05,
+    act_better_up10 = actual_pct>=1.1
     
 ) %>%
     filter(close_last>5 & volume_last>50000) 
