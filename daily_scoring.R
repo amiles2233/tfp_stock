@@ -210,15 +210,7 @@ out_df <- tibble(
     prob_better_flat = est_pct_move(loc, scale, skewness, tailweight, close_last, 1),
     prob_better_up01 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.01),
     prob_better_up05 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.05),
-    prob_better_up10 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.1),
-    
-    act_better_down10 = actual_pct>=.9,
-    act_better_down05 = actual_pct>=.95,
-    act_better_down01 = actual_pct>=.99,
-    act_better_flat = actual_pct>=1,
-    act_better_up01 = actual_pct>=1.01,
-    act_better_up05 = actual_pct>=1.05,
-    act_better_up10 = actual_pct>=1.1
+    prob_better_up10 = est_pct_move(loc, scale, skewness, tailweight, close_last, 1.1)
     
 ) %>%
     filter(close_last>5 & volume_last>50000) 
