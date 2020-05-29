@@ -14,26 +14,27 @@ library(AlpacaforR)
 
 plan(multiprocess)
 
-#use_condaenv('tf2gpu', required = TRUE)
+use_condaenv('tf2gpu', required = TRUE)
 
-#py_config()
+py_config()
 
-#tf_config()
+tf_config()
 
-#tf_gpu_configured()
+tf_gpu_configured()
 
-#md <- keras_model_sequential() %>% layer_dense(units=2, input_shape=5, activation='relu')
+md <- keras_model_sequential() %>% layer_dense(units=2, input_shape=5, activation='relu')
 
+rm(md)
 ###### Pull Alpaca Stock Info
 acct <- get_account()
 
 assets <- get_assets()
 
-calendar <- get_calendar(from = Sys.Date()-days(70), to=Sys.Date()) %>%
+calendar <- get_calendar(from = Sys.Date()-days(70), to=Sys.Date()+days(5)) %>%
     arrange(desc(date)) %>%
+    mutate(next_trade_day=lag(date)) %>%
+    filter(date<=Sys.Date()) %>%
     slice(1:43) 
-
-trading_day <- Sys.Date()
 
 #trading_day <- as.Date('2020-05-18')
 
@@ -80,6 +81,10 @@ saveRDS(df, 'daily_stock_ts.RDS')
 df <- readRDS('daily_stock_ts.RDS')
 
 
+trading_day <- calendar %>% filter(date==max(df$date)) %>% .$next_trade_day
+
+
+
 df <- df %>%
     filter(n_obs>=40) %>%
     top_n(40, date) %>%
@@ -88,8 +93,8 @@ df <- df %>%
     mutate_at(vars(close:volume), log) %>%
     distinct() %>%
     pivot_wider(names_from = idx, values_from = close:volume, names_sep = "") %>%
-    ungroup()
-
+    ungroup() %>%
+    na.omit()
 
 
 x_ts <- df %>%
@@ -163,7 +168,7 @@ model_supp <- keras_model(
 )
 
 
-load_model_weights_tf(model_supp, 'stonk_weights_v2.tf')
+load_model_weights_tf(model_supp, 'stonk_weights_v2_log.tf')
 
 
 
@@ -182,6 +187,10 @@ est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
 
 
 out_df <- tibble(
+    
+    date = trading_day,
+    
+    ticker = df$ticker,
     
     loc = pred_dist$loc %>% as.numeric(),
     scale = pred_dist$scale %>% as.numeric(),
@@ -217,3 +226,6 @@ out_df <- tibble(
 
 
 saveRDS(out_df, 'pred_df_daily.RDS')
+
+
+write_csv(out_df, paste0('D:/daily_stock_scoring/pred_dist_', str_replace_all(trading_day, '-', '_'), '.csv'))
