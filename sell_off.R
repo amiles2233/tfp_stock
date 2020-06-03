@@ -1,6 +1,11 @@
 library(tidyverse)
 library(AlpacaforR)
 
+
+## Cancel ALL Orders
+
+cancel_order(all = TRUE)
+
 positions <- get_positions()
 
 sell_off_limit <- function(ticker, qty, last_price, side, ...) {

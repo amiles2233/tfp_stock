@@ -15,11 +15,19 @@ plan(multiprocess)
 #use_condaenv('tf2gpu', required = TRUE)
 
 acct <- get_account()
+positions <- get_positions()
+supported <- supported_tickers()
+
 
 out_df <- readRDS('pred_df_daily.RDS') %>%
-    filter(! ticker %in% 'TSLF')
+    filter(! ticker %in% 'AOBC')
 
-quotes <- future_map_dfr(out_df$ticker, riingo_iex_quote, .progress = TRUE)
+quotes <- future_map(out_df$ticker, safely(riingo_iex_quote, otherwise = NA), .progress = TRUE)
+non_error_idx <- map_dbl(seq(1:length(quotes)), function(x) is.null(quotes[[x]]$error)) %>% as.logical()
+
+quotes <- map_dfr(seq(1:length(quotes))[non_error_idx], function(x) quotes[[x]]$result)
+
+
 
 quotes <- quotes %>%
     filter(as.Date(quoteTimestamp)==Sys.Date()) %>%
@@ -29,6 +37,8 @@ quotes <- quotes %>%
 
 intraday <- out_df %>%
     inner_join(quotes, by='ticker') %>%
+    inner_join(supported %>% filter(assetType=='Stock') %>% select(ticker)) %>%
+    filter(!ticker %in% positions$symbol) %>%
     mutate(last_prop=last/close_last) 
 
 
@@ -38,13 +48,13 @@ get_intraday_cdf <- function(value, loc, scale, skewness, tailweight){
                                             skewness = skewness,
                                             tailweight = tailweight
     ),
-    value) %>%
+    log(value)) %>%
         as.numeric()
     
 }
 
 
-cdf_inp <- list(value=intraday$last_prop,
+cdf_inp <- list(value=intraday$last,
                 loc=intraday$loc,
                 scale=intraday$scale,
                 skewness=intraday$skewness,

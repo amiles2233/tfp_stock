@@ -51,6 +51,8 @@ supported <- supported_tickers() %>%
 
 get_current_prices <- function(ticker){
     dat <- riingo_prices(ticker, start_date = min(calendar$date)) %>%
+        select(-close, -high, -low, -open, -volume) %>%
+        rename_at(.vars = vars(contains('adj')), function(x) tolower(str_replace_all(x, 'adj', ''))) %>%
         select(ticker:volume) %>%
         group_by(ticker) %>%
         mutate(idx=nrow(.):1,

@@ -89,6 +89,7 @@ est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
 
 
 out_df <- tibble(
+
   
   loc = pred_dist$loc %>% as.numeric(),
   scale = pred_dist$scale %>% as.numeric(),

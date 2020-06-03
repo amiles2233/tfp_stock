@@ -10,13 +10,13 @@ positions <- get_positions(live = FALSE) %>%
   filter(! symbol %in% orders$symbol) %>% # Remove tickers with active orders
   group_by(symbol) %>%
   mutate(stop_limit_price = ifelse(side=='long',
-                                   min(c(market_value*.95, quant10_dlr)),
-                                   max(c(market_value*1.05, quant90_dlr)))) %>%
+                                   min(c(quant10_dlr, current_price*.97)),
+                                   max(c(quant90_dlr, current_price*1.03)))) %>%
   ungroup()
 
 
 ls_inp <- list(ticker = positions$symbol,
-               qty = positions$qty,
+               qty = abs(positions$qty),
                side = ifelse(positions$side=='long', 'sell', 'buy'),
                price = positions$stop_limit_price) 
 
@@ -27,9 +27,9 @@ submit_stop_limit = function(ticker, qty, side, price, ...) {
                type = 'stop_limit',
                time_in_force = 'day',
                limit_price = price,
-               stop_price = price*.999,
+               stop_price = price*.9999,
                extended_hours = FALSE,
                live = FALSE)
 }
 
-pmap(.l=ls_inp, .f=submit_stop_limit)
+stop_limit_orders <- pmap(.l=ls_inp, .f=submit_stop_limit)
