@@ -1,0 +1,219 @@
+---
+title: "Daily Benchmarking"
+author: "Aaron Miles - CAIO, Prosper Investing"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(AlpacaforR)
+library(riingo)
+library(lubridate)
+library(furrr)
+library(tensorflow)
+library(tfprobability)
+plan(multiprocess)
+
+## Read Daily File
+trading_day <- Sys.Date()
+  
+
+out_df <- read_csv( paste0('D:/daily_stock_scoring/pred_dist_', str_replace_all(trading_day, '-', '_'), '.csv'))
+  
+
+
+est_pct_move <- function(loc, scale, skewness, tailweight, close_last, pct){
+  1 - as.numeric(tfd_cdf(
+    distribution = tfd_sinh_arcsinh(loc=loc, scale=scale, skewness=skewness, tailweight=tailweight),
+    value = log(close_last*pct)
+  ))
+}
+
+
+today_price <- future_map(unique(out_df$ticker), safely(function(x) riingo_prices(x, start_date = trading_day, end_date = trading_day), otherwise = NA))
+
+non_error_idx <- map_dbl(seq(1:length(today_price)), function(x) is.null(today_price[[x]]$error)) %>% as.logical()
+
+today_price <- map_dfr(seq(1:length(today_price))[non_error_idx], function(x) today_price[[x]]$result)
+
+
+
+out_df <- out_df %>%
+  left_join(select(today_price, ticker, adjClose)) %>%
+  rename(actual_dlr = adjClose) %>%
+  mutate(actual_pct = actual_dlr/close_last,
+         actual_cdf = est_pct_move(loc, scale, skewness, tailweight, actual_dlr, 1),
+         up10_dlr = actual_dlr>quant10_dlr,
+         up25_dlr = actual_dlr>quant25_dlr,
+         up50_dlr = actual_dlr>quant50_dlr,
+         up75_dlr = actual_dlr>quant75_dlr,
+         up90_dlr = actual_dlr>quant90_dlr,
+         act_better_down10 = actual_pct>=.9,
+         act_better_down05 = actual_pct>=.95,
+         act_better_down01 = actual_pct>=.99,
+         act_better_flat = actual_pct>=1,
+         act_better_up01 = actual_pct>=1.01,
+         act_better_up05 = actual_pct>=1.05,
+         act_better_up10 = actual_pct>=1.1) %>%
+  na.omit()
+
+benchmark_df <- tibble(
+  over_quantile = c('up10_dlr', 'up25_dlr', 'up50_dlr', 'up75_dlr', 'up90_dlr'),
+  pct = c(.9, .75, .5, .25, .1)
+)
+
+
+```
+
+## Daily Evaluation for `r trading_day`
+
+In the interest of continuously modeling and evaluating the model, this script (run after market close daily) allows us to see how the model performed on various metrics, similar to those used in model evaluation.
+
+#### Quantile Calibration
+
+The model outputs quantiles, which only a certain percent of stocks should surpass. For example, 90% of stocks should go beyond the 10th quantile, 75% should go higher than the 25th quantile, and so on. The below chart shows the actual percentage compared to what a perfect model would produce.
+
+```{r quantiles, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+out_df %>%
+  select(up10_dlr:up90_dlr) %>% 
+  summarize_each(funs = mean) %>%
+  pivot_longer(up10_dlr:up90_dlr, names_to = 'over_quantile', values_to = 'pct') %>%
+  ggplot(aes(x=over_quantile, y=pct, label=scales::percent(pct, accuracy = .01))) +
+  geom_col(fill='darkgreen') +
+  geom_col(data = benchmark_df, 
+           mapping = aes(x=over_quantile, y=pct),
+           fill=NA, color='black') +
+  geom_text(vjust=1, color='white') +
+  theme_minimal() +
+  scale_y_continuous(labels=scales::percent) +
+  ggtitle('% Stocks Going Over Specified Quantile') +
+  theme_dark() +
+  ylab('% Going above Quantile') +
+  xlab('Quantile Benchmark') +
+  ggtitle('Quantile Calibration',
+          subtitle = 'Black Boxes are Benchmarks of Perfect Calibrated Quantiles (e.g. 90% going above 10th percentile)')
+
+```
+
+Another way to look at this would be to see the distribution of CDFs of actual close prices. For example is we predicted a stock's distribution for the day, we can estimate the probability of it closing better than any value. If we feed the actual closing price as that value, we can get an estimate of what the model thought the likelihood of performing better than the actual close was. If the model is working well, this should be a uniform distribution from 0 to 1.
+
+```{r cdfs, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+out_df %>%
+  ggplot(aes(x=actual_cdf)) +
+  geom_density(fill = 'darkgreen') +
+  geom_density(data = enframe(as.numeric(tfd_sample(tfd_uniform(), 10000))), 
+               mapping = aes(x=value), 
+               color='black', linetype='dashed', fill='white', alpha=.3) +
+  theme_dark() +
+  ggtitle('CDF of Actual Close Prices',
+          subtitle = 'White Distribution is Theoretical Uniform Distribution (Expected in Long Run)')
+
+```
+
+
+#### Uncertainty Range
+
+Stocks with greater uncertainty should have a wider range of performance. To measure this, I subtract the 75th quantile from the 25th quantile to make a 50% prediction interval, and subtract the 90th quantile from the 10th quantile to create an 80% prediction interval. If the model is working well, we should see more variation as these intervals increase increase.
+
+```{r rangevactual, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+out_df %>%
+  mutate(range_80 = quant90_pct-quant10_pct,
+         range_50 = quant75_pct-quant25_pct) %>%
+  select(actual_pct, range_80, range_50) %>%
+  pivot_longer(range_80:range_50, names_to = 'range_type', values_to = 'range_val') %>%
+  ggplot(aes(x=range_val, y=actual_pct, color=range_type, fill=range_type)) +
+  geom_point(alpha=.1) +
+  geom_smooth() +
+  facet_wrap(~range_type, scales = 'free') +
+  coord_cartesian(xlim = c(0, .1)) +
+  theme_dark() +
+  ylab('Actual % Change') +
+  xlab('Quantile Range') +
+  ggtitle('Variation by Quantile Range')
+
+
+```
+
+
+Another way of looking at this is to group the quantile ranges into n buckets and see if the standard deviation of performance increases at higher buckets. If the model is working well, we should see higher standard deviations in the buckets that have greater prediction intervals
+
+```{r rangesd, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+out_df %>%
+  mutate(range_80 = quant90_pct-quant10_pct,
+         range_50 = quant75_pct-quant25_pct) %>%
+  select(actual_pct, range_80, range_50) %>%
+  pivot_longer(range_80:range_50, names_to = 'range_type', values_to = 'range_val') %>%
+  group_by(range_type) %>%
+  mutate(range_cut=cut_number(range_val, 5)) %>%
+  group_by(range_type, range_cut) %>%
+  summarize(act_sd=sd(actual_pct, na.rm = TRUE)) %>%
+  ungroup() %>%
+  arrange(act_sd) %>%
+  mutate(range_cut = fct_inorder(range_cut)) %>%
+  ggplot(aes(x=range_cut, y=act_sd, label=round(act_sd, 4))) +
+  facet_wrap(~range_type, scales = 'free',
+             ncol = 1) +
+  geom_col(fill = 'darkgreen') +
+  geom_text(hjust=1, color='white') +
+  coord_flip() +
+  theme_dark() +
+  ylab('Range between Quantiles (Grouped)') +
+  xlab('Standard Deviation') +
+  ggtitle('Standard Deviation by Quantile Range')
+
+
+```
+
+#### Price Movement
+
+Is the model predicting actual close prices well? This is somewhat trickier given that we're modeling a distribution and not just a single outcome. Overall, taking the 50th quantile, or the median prediction, we should see higher close values for predictions with higher median predictions, if the model is working well.
+
+```{r actualvpred, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+
+out_df %>%
+  ggplot(aes(x=quant50_pct, y=actual_pct)) +
+  geom_point(alpha=.3, color='green') +
+  geom_smooth() +
+  coord_cartesian(xlim = c(.95, 1.05)) +
+  theme_dark() +
+  ggtitle('Quant50 % vs Actual Close %')
+
+```
+
+The model also puts out probabilities of performing better than certain benchmarks, for example the model will estimate the probability that a stock performs better than being down 1% (rate of return > .99). Looking at the probabilities of surpassing being down 1%, being flat, and being up 1%, I group these probabilities into n groups, and observe the proportion of stocks that actually surpassed that threshold. For example, if a group contains stocks that had between a 60% and 80% chance of being better than flat, the proportion of stocks in that group performing better than flat should be somewhere between 60% and 80%. At the very least, there should be some directional signal, where stocks with a higher probability of surpassing benchmarks perform better than those with a lower probability, even if the percentages aren't exactly correct.
+
+```{r pctilecalibr, error=FALSE, echo=FALSE, message=FALSE, warning=FALSE}
+out_df %>%
+  mutate(idx=1:nrow(.)) %>%
+  select(idx, prob_better_down01:prob_better_up01, act_better_down01:act_better_up01) %>%
+  pivot_longer(cols=prob_better_down01:act_better_up01,names_to = c('prob_act', 'direction'), values_to = 'values',
+               names_sep = '_better_') %>%
+  pivot_wider(values_from = values, names_from = prob_act) %>%
+  group_by(direction) %>%
+  mutate(prob_cut=cut_number(prob,5)) %>%
+  ungroup() %>%
+  arrange(prob) %>%
+  mutate(prob_cut = fct_inorder(prob_cut)) %>%
+  group_by(direction, prob_cut) %>%
+  summarize(act=mean(act),
+            n=n()) %>%
+  ungroup() %>%
+  ggplot(aes(x=prob_cut, y=act, label = scales::percent(act))) +
+  geom_col(fill = 'darkgreen') +
+  geom_text(hjust=1, color='white') +
+  facet_wrap(~direction, scales = 'free_y',
+             ncol = 1) +
+  coord_flip() +
+  theme_dark() +
+  ggtitle('Performance Probability Estimations vs Actual Performance') +
+  ylab('Probability of Crossing Benchmark (Grouped)') +
+  xlab('Actual % Crossing Benchmark')
+
+
+
+```
+
+

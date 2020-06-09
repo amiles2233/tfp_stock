@@ -42,18 +42,20 @@ poly_current_price <- function(ticker){
 }
 
 
-current_price <- future_map_dfr(out_df$ticker, poly_current_price, .progress = TRUE)
+current_price <- future_map_dfr(out_df$ticker, poly_current_price, .progress = TRUE) %>%
+    distinct()
 
 
 high_upside <- out_df %>%
     inner_join(supported %>% filter(assetType=='Stock') %>% select(ticker)) %>%
     inner_join(current_price, by='ticker') %>%
-    mutate(price = ifelse(is.na(price), close_last, price),
-        quant10_pct = quant10_dlr/price, 
-        quant25_pct = quant25_dlr/price, 
-        quant50_pct = quant50_dlr/price, 
-        quant75_pct = quant75_dlr/price, 
-        quant90_pct = quant90_dlr/price) %>%
+    mutate(price = ifelse(is.na(price), close_last, price)#,
+        #quant10_pct = quant10_dlr/price, 
+        #quant25_pct = quant25_dlr/price, 
+        #quant50_pct = quant50_dlr/price, 
+        #quant75_pct = quant75_dlr/price, 
+        #quant90_pct = quant90_dlr/price
+        ) %>%
     filter(abs(1-quant75_pct)>abs(1-quant25_pct),
            abs(1-quant90_pct)>abs(1-quant10_pct)
            #skewness>0,
@@ -61,11 +63,12 @@ high_upside <- out_df %>%
            ) %>%
     arrange(-prob_better_up01) %>%
     #filter(!ticker %in% 'SRTY') %>%
-    slice(1:20)
+    slice(1:50)
 
 high_upside <- riingo_iex_quote(high_upside$ticker) %>%
     select(ticker, last, bidPrice, askPrice) %>%
     inner_join(high_upside) %>%
+    distinct() %>%
     rowwise() %>%
     mutate(tgt_price = min(quant50_dlr, price, na.rm=TRUE))
     
@@ -78,16 +81,17 @@ riingo_meta(high_upside$ticker) %>%
 low_upside <- out_df %>%
     inner_join(supported %>% filter(assetType=='Stock') %>% select(ticker)) %>% ## Filter to Only Stocks
     inner_join(current_price, by='ticker') %>%
-    mutate(price = ifelse(is.na(price), close_last, price),
-           quant10_pct = quant10_dlr/price, 
-           quant25_pct = quant25_dlr/price, 
-           quant50_pct = quant50_dlr/price, 
-           quant75_pct = quant75_dlr/price, 
-           quant90_pct = quant90_dlr/price) %>%
+    mutate(price = ifelse(is.na(price), close_last, price)#,
+           #quant10_pct = quant10_dlr/price, 
+           #quant25_pct = quant25_dlr/price, 
+           #quant50_pct = quant50_dlr/price, 
+           #quant75_pct = quant75_dlr/price, 
+           #quant90_pct = quant90_dlr/price
+    )  %>%
     filter(ticker %in% shortable$symbol,
            abs(1-quant75_pct)<abs(1-quant25_pct),
            abs(1-quant90_pct)<abs(1-quant10_pct)) %>%
-    arrange(prob_better_flat) %>%
+    arrange(prob_better_down01) %>%
     filter(!ticker %in% c('REK')) %>%
     slice(1:20)
 
@@ -95,6 +99,7 @@ low_upside <- out_df %>%
 low_upside <- riingo_iex_quote(low_upside$ticker) %>%
     select(ticker, last, bidPrice, askPrice) %>%
     inner_join(low_upside) %>%
+    distinct() %>%
     rowwise() %>%
     mutate(tgt_price = max(quant50_dlr, price, na.rm = TRUE))
 
